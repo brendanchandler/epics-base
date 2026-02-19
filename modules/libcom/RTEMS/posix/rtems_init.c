@@ -96,19 +96,31 @@ epicsEventId 	dhcpDone;
 /* these settings are needed by the rtems startup
  * may provide by dhcp/bootp
  * or environments from the "BIOS" like u-boot, motboot etc.
+ * These hardcoded values will be assigned to other variables 
+ * and can be overwritten. They are just initial values.
  */
 char rtemsInit_NTP_server_ip[16] = "";
 char bootp_server_name_init[128] = "1001.1001@10.0.5.1:/epics";
 char bootp_boot_file_name_init[128] = "/epics/myExample/bin/RTEMS-beatnik/myExample.boot";
 char bootp_cmdline_init[128] = "/epics/myExample/iocBoot/iocmyExample/st.cmd";
 
-/* TODO check rtems_bsdnet_bootp_cmdline */
-#ifndef RTEMS_LEGACY_STACK
-struct in_addr rtems_bsdnet_bootp_server_address;
-char *rtems_bsdnet_bootp_server_name = bootp_server_name_init;
-char *rtems_bsdnet_bootp_boot_file_name = bootp_boot_file_name_init;
-char *rtems_bsdnet_bootp_cmdline = bootp_cmdline_init;
-#endif // not LEGACY Stack
+/* These settings are for obtaining environment variables for boot
+ * from NVRAM
+ */
+char *nvram_dhcpena;
+char *nvram_if ;
+char *nvram_ip ;
+char *nvram_netmask ;
+char *nvram_gateway;
+char *nvram_bootserver; /* TFTP/boot server IP, also used as DNS/NTP fallback */
+char *nvram_ntpserver;
+char *nvram_epics_script;
+char *nvram_hostname;
+char *nvram_boot_file_name;
+
+char *rtems_bootp_server_name = bootp_server_name_init;
+char *rtems_bootp_boot_file_name = bootp_boot_file_name_init;
+char *rtems_bootp_cmdline = bootp_cmdline_init;
 
 /*
  * Prototypes for some functions not in header files
@@ -234,7 +246,7 @@ initialize_local_filesystem(char **argv)
     extern char _FlashBase[] __attribute__((weak));
     extern char _FlashSize[]  __attribute__((weak));
 
-    argv[0] = rtems_bsdnet_bootp_boot_file_name;
+    argv[0] = rtems_bootp_boot_file_name;
     if (epicsRtemsMountLocalFilesystem(argv)==0) {
         return 1; /* FS setup successful */
 #ifdef RTEMS_LEGACY_STACK
@@ -336,7 +348,7 @@ initialize_remote_filesystem(char **argv, int hasLocalFilesystem)
                                                 mount_point, strerror(errno));
             *cp = '/';
         }
-        argv[1] = rtems_bsdnet_bootp_cmdline;
+        argv[1] = rtems_bootp_cmdline;
     }
     else if (hasLocalFilesystem) {
         return;
@@ -348,22 +360,22 @@ initialize_remote_filesystem(char **argv, int hasLocalFilesystem)
          * if the pathname does not begin with a '/'.  This allows
          * NFS and TFTP to have a similar view of the remote system.
          */
-        if (rtems_bsdnet_bootp_cmdline[0] == '/')
-            cp = rtems_bsdnet_bootp_cmdline + 1;
+        if (rtems_bootp_cmdline[0] == '/')
+            cp = rtems_bootp_cmdline + 1;
         else
-            cp = rtems_bsdnet_bootp_cmdline;
+            cp = rtems_bootp_cmdline;
         cp = strchr(cp, '/');
         if ((cp == NULL)
-         || ((l = cp - rtems_bsdnet_bootp_cmdline) == 0))
-            LogFatal("\"%s\" is not a valid command pathname.\n", rtems_bsdnet_bootp_cmdline);
+         || ((l = cp - rtems_bootp_cmdline) == 0))
+            LogFatal("\"%s\" is not a valid command pathname.\n", rtems_bootp_cmdline);
         cp = mustMalloc(l + 20, "NFS mount paths");
         server_path = cp;
-        server_name = rtems_bsdnet_bootp_server_name;
-        if (rtems_bsdnet_bootp_cmdline[0] == '/') {
+        server_name = rtems_bootp_server_name;
+        if (rtems_bootp_cmdline[0] == '/') {
             mount_point = server_path;
-            strncpy(mount_point, rtems_bsdnet_bootp_cmdline, l);
+            strncpy(mount_point, rtems_bootp_cmdline, l);
             mount_point[l] = '\0';
-            argv[1] = rtems_bsdnet_bootp_cmdline;
+            argv[1] = rtems_bootp_cmdline;
             /*
              * Its probably common to embed the mount point in the server
              * name so, when this is occurring, don't clobber the mount point
@@ -400,14 +412,14 @@ initialize_remote_filesystem(char **argv, int hasLocalFilesystem)
             }
         }
         else {
-            char *abspath = mustMalloc(strlen(rtems_bsdnet_bootp_cmdline)+2,"Absolute command path");
+            char *abspath = mustMalloc(strlen(rtems_bootp_cmdline)+2,"Absolute command path");
             strcpy(server_path, "/tftpboot/");
             mount_point = server_path + strlen(server_path);
-            strncpy(mount_point, rtems_bsdnet_bootp_cmdline, l);
+            strncpy(mount_point, rtems_bootp_cmdline, l);
             mount_point[l] = '\0';
             mount_point--;
             strcpy(abspath, "/");
-            strcat(abspath, rtems_bsdnet_bootp_cmdline);
+            strcat(abspath, rtems_bootp_cmdline);
             argv[1] = abspath;
         }
     }
@@ -990,8 +1002,8 @@ POSIX_Init ( void *argument __attribute__((unused)))
     if (epicsRtemsInitPreSetBootConfigFromNVRAM(&rtems_bsdnet_config) != 0)
         delayedPanic("epicsRtemsInitPreSetBootConfigFromNVRAM");
     if (rtems_bsdnet_config.bootp == NULL) {
-        extern int setBootConfigFromNVRAM(char *, size_t);
-        setBootConfigFromNVRAM(NULL, 0);
+        extern int setBootConfigFromNVRAM(void);
+        setBootConfigFromNVRAM();
     }
     if (epicsRtemsInitPostSetBootConfigFromNVRAM(&rtems_bsdnet_config) != 0)
         delayedPanic("epicsRtemsInitPostSetBootConfigFromNVRAM");
@@ -1049,12 +1061,22 @@ POSIX_Init ( void *argument __attribute__((unused)))
 
     /* Check whether global environment static network config exists.
      * If so, use that, else, fall back to DHCP. */
-    extern int setBootConfigFromNVRAM(char *, size_t);
-    int status = setBootConfigFromNVRAM(rtemsInit_NTP_server_ip,
-                                             sizeof(rtemsInit_NTP_server_ip));
-    bool try_dhcp = status != 0;
+    extern int setBootConfigFromNVRAM();
+    int status = setBootConfigFromNVRAM();
+    
+    //Update NTP_server_ip
+    if (nvram_ntpserver != NULL){
+      for (int i=0;i<16;i++){
+          if (nvram_ntpserver[i] != '\0'){
+	      rtemsInit_NTP_server_ip[i] = nvram_ntpserver[i];
+	  }
+      }
+    }
+    rtems_bootp_cmdline = nvram_epics_script;
+    rtems_bootp_boot_file_name = nvram_boot_file_name;
+    rtems_bootp_server_name = nvram_bootserver;
 
-    if (try_dhcp) {
+    if (strcmp(nvram_dhcpena, "yes")==0 || status != 0){
         printf("\n***** add dhcpcd hook *****\n");
         dhcpDone = epicsEventMustCreate(epicsEventEmpty);
         rtems_dhcpcd_add_hook(&dhcpcd_hook);
@@ -1062,23 +1084,52 @@ POSIX_Init ( void *argument __attribute__((unused)))
         printf("\n***** Start default network dhcpcd *****\n");
         // if MY_BOOTP???
         default_network_dhcpcd();
+    }else{
+      /*
+       * Configure interface with static IP and optional gateway using libbsd
+       */
+        printf("Configuring ifconfig with ip=%s, netmask=%s, gateway=%s\n",
+               nvram_ip? nvram_ip: "NULL",
+               nvram_netmask? nvram_netmask: "NULL",
+               nvram_gateway? nvram_gateway: "NULL");
+
+        if (nvram_ip && nvram_netmask) {
+            int exit_code;
+            exit_code = rtems_bsd_ifconfig(nvram_if, nvram_ip, nvram_netmask, nvram_gateway);
+	    sleep(5);
+            if (exit_code != 0) {
+                printf("rtems_bsd_ifconfig failed (exit code %d)\n", exit_code);
+                exit(-1);
+            }
+        } else {
+            printf("Failed ifconfig with static IP address and netmask from NVRAM\n");
+            exit(-1);
+        }
+
+        sethostname (nvram_hostname, strlen (nvram_hostname));
     }
-    
+
+    /*
+     * Set NTP server for one-shot time sync
+     */
+
     /* this seems to be hard coded in the BSP -> Sebastian Huber ? */
     printf("\n--Info (hpj)-- bsd task prio IRQS: %d  -----\n", rtems_bsd_get_task_priority("IRQS"));
     printf("\n--Info (hpj)-- bsd task prio TIME: %d  -----\n", rtems_bsd_get_task_priority("TIME"));
 
 
-    // wait for dhcp done ... should be if SYNCDHCP is used
-    epicsEventWaitStatus stat;
-    printf("\n ---- Waiting for DHCP ...\n");
-    stat = epicsEventWaitWithTimeout(dhcpDone, 600); 
-    if (stat == epicsEventOK)
-    	epicsEventDestroy(dhcpDone);
-    else if (stat == epicsEventWaitTimeout)
-        printf("\n ---- DHCP timed out!\n");
-    else
-	printf("\n ---- dhcpDone Event Unknown state %d\n", stat);
+    if (strcmp(nvram_dhcpena, "yes")==0){
+        // wait for dhcp done ... should be if SYNCDHCP is used
+        epicsEventWaitStatus stat;
+        printf("\n ---- Waiting for DHCP ...\n");
+        stat = epicsEventWaitWithTimeout(dhcpDone, 600); 
+        if (stat == epicsEventOK)
+        	epicsEventDestroy(dhcpDone);
+        else if (stat == epicsEventWaitTimeout)
+            printf("\n ---- DHCP timed out!\n");
+        else
+            printf("\n ---- dhcpDone Event Unknown state %d\n", stat);
+    }
 
     const char* ifconfg_args[] = {
         "ifconfig", NULL
@@ -1130,6 +1181,10 @@ POSIX_Init ( void *argument __attribute__((unused)))
     printf("\n***** Network Status  *****\n");
     rtems_netstat(3);
     rtems_bsdnet_synchronize_ntp (0, 0);
+
+    rtems_bootp_server_name = rtems_bsdnet_bootp_server_name;
+    rtems_bootp_boot_file_name = rtems_bsdnet_bootp_boot_file_name;
+    rtems_bootp_cmdline = rtems_bsdnet_bootp_cmdline;
 #endif // not RTEMS_LEGACY_STACK
 
     printf("\n***** Setting up file system *****\n");
